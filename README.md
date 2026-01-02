@@ -29,4 +29,3 @@ npm run dev
 - `core/registry/AppRegistry.ts` - App persistence layer
 - `app/page.tsx` - Landing page
 - `app/apps/[id]/page.tsx` - App preview page
-
