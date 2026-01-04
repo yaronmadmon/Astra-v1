@@ -3,15 +3,30 @@
 import { useRouter } from 'next/navigation';
 import { AppRegistry } from '@/core/registry/AppRegistry';
 import { AppBlueprint } from '@/core/blueprint/AppBlueprint';
+import { voiceCore } from '@/core/voice/VoiceCore';
 import React, { useEffect, useState } from 'react';
 
 export default function Home() {
   const router = useRouter();
   const [apps, setApps] = useState<AppBlueprint[]>([]);
   const [textInput, setTextInput] = useState('');
+  const [isListening, setIsListening] = useState(false);
 
   useEffect(() => {
     setApps(AppRegistry.listApps());
+
+    // Subscribe to voice transcripts
+    const unsubscribe = voiceCore.onTranscript((transcript) => {
+      if (transcript.isFinal) {
+        setTextInput(transcript.text);
+        setIsListening(false);
+        voiceCore.stopListening();
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
   }, []);
 
   const handleCreateApp = () => {
@@ -41,6 +56,16 @@ export default function Home() {
       if (updatedApp) {
         setApps(AppRegistry.listApps());
       }
+    }
+  };
+
+  const handleMicClick = () => {
+    if (isListening) {
+      voiceCore.stopListening();
+      setIsListening(false);
+    } else {
+      voiceCore.startListening('landing');
+      setIsListening(true);
     }
   };
 
@@ -134,27 +159,44 @@ export default function Home() {
         }}>
           AI-first app and web builder
         </p>
-        <input
-          type="text"
-          value={textInput}
-          onChange={(e) => setTextInput(e.target.value)}
-          placeholder="Enter text..."
-          style={{
-            width: '100%',
-            maxWidth: '500px',
-            padding: '12px 16px',
-            fontSize: '16px',
-            border: '1px solid #2d3a5a',
-            borderRadius: '8px',
-            outline: 'none',
-            marginBottom: '24px',
-            transition: 'border-color 0.2s',
-            backgroundColor: '#141b33',
-            color: '#fff',
-          }}
-          onFocus={(e) => e.currentTarget.style.borderColor = '#667eea'}
-          onBlur={(e) => e.currentTarget.style.borderColor = '#2d3a5a'}
-        />
+        <div style={{ display: 'flex', gap: '8px', alignItems: 'center', maxWidth: '500px', marginBottom: '24px' }}>
+          <input
+            type="text"
+            value={textInput}
+            onChange={(e) => setTextInput(e.target.value)}
+            placeholder="Enter text..."
+            style={{
+              flex: 1,
+              padding: '12px 16px',
+              fontSize: '16px',
+              border: '1px solid #2d3a5a',
+              borderRadius: '8px',
+              outline: 'none',
+              transition: 'border-color 0.2s',
+              backgroundColor: '#141b33',
+              color: '#fff',
+            }}
+            onFocus={(e) => e.currentTarget.style.borderColor = '#667eea'}
+            onBlur={(e) => e.currentTarget.style.borderColor = '#2d3a5a'}
+          />
+          <button
+            onClick={handleMicClick}
+            style={{
+              padding: '12px',
+              fontSize: '16px',
+              backgroundColor: isListening ? '#ef4444' : 'transparent',
+              color: isListening ? '#fff' : '#667eea',
+              border: `1px solid ${isListening ? '#ef4444' : '#667eea'}`,
+              borderRadius: '8px',
+              cursor: 'pointer',
+              transition: 'all 0.2s',
+              minWidth: '44px',
+            }}
+            title={isListening ? 'Stop listening' : 'Start voice input'}
+          >
+            🎤
+          </button>
+        </div>
         <button
           onClick={handleCreateApp}
           style={{

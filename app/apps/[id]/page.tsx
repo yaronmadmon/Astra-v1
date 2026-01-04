@@ -3,34 +3,10 @@
 import { useParams, useRouter } from 'next/navigation';
 import { AppRegistry } from '@/core/registry/AppRegistry';
 import { AppBlueprint, Page } from '@/core/blueprint/AppBlueprint';
+import { Command } from '@/core/command/CommandTypes';
+import { IntentAnalyzer, IntentResult, IntentSuggestion } from '@/core/intent/IntentAnalyzer';
+import { voiceCore } from '@/core/voice/VoiceCore';
 import React, { useEffect, useState } from 'react';
-
-// Command types
-type CommandType = 'ADD_PAGE' | 'RENAME_PAGE' | 'DELETE_PAGE';
-
-interface AddPageCommand {
-  type: 'ADD_PAGE';
-  payload: {
-    pageName: string;
-  };
-}
-
-interface RenamePageCommand {
-  type: 'RENAME_PAGE';
-  payload: {
-    oldName: string;
-    newName: string;
-  };
-}
-
-interface DeletePageCommand {
-  type: 'DELETE_PAGE';
-  payload: {
-    pageName: string;
-  };
-}
-
-type Command = AddPageCommand | RenamePageCommand | DeletePageCommand;
 
 export default function AppPreviewPage() {
   const params = useParams();
@@ -40,6 +16,8 @@ export default function AppPreviewPage() {
   const [previewMode, setPreviewMode] = useState<'desktop' | 'mobile'>('desktop');
   const [commandInput, setCommandInput] = useState('');
   const [activePageId, setActivePageId] = useState<string | null>(null);
+  const [intentResult, setIntentResult] = useState<IntentResult | null>(null);
+  const [isListening, setIsListening] = useState(false);
 
   useEffect(() => {
     const loadedApp = AppRegistry.getApp(id);
@@ -68,65 +46,6 @@ export default function AppPreviewPage() {
       }
     }
   }, [app?.pages, activePageId]);
-
-  const handleModeToggle = (mode: 'desktop' | 'mobile') => {
-    setPreviewMode(mode);
-    if (app) {
-      AppRegistry.updateApp(app.id, {
-        layout: {
-          ...app.layout,
-          previewMode: mode,
-        },
-      });
-      setApp(AppRegistry.getApp(app.id));
-    }
-  };
-
-  // Parse raw command text into structured Command object
-  const parseCommand = (commandText: string): Command | null => {
-    const trimmedCommand = commandText.trim().toLowerCase();
-    const originalCommand = commandText.trim();
-    
-    // Parse "add page <PageName>"
-    if (trimmedCommand.startsWith('add page ')) {
-      const pageName = originalCommand.substring(9).trim();
-      if (pageName) {
-        return {
-          type: 'ADD_PAGE',
-          payload: { pageName },
-        };
-      }
-    }
-    // Parse "rename page <OldName> to <NewName>"
-    else if (trimmedCommand.startsWith('rename page ') && trimmedCommand.includes(' to ')) {
-      const originalLower = originalCommand.toLowerCase();
-      const toIndex = originalLower.indexOf(' to ', 12);
-      
-      if (toIndex > 12) {
-        const oldName = originalCommand.substring(12, toIndex).trim();
-        const newName = originalCommand.substring(toIndex + 4).trim();
-        
-        if (oldName && newName) {
-          return {
-            type: 'RENAME_PAGE',
-            payload: { oldName, newName },
-          };
-        }
-      }
-    }
-    // Parse "delete page <PageName>"
-    else if (trimmedCommand.startsWith('delete page ')) {
-      const pageName = originalCommand.substring(12).trim();
-      if (pageName) {
-        return {
-          type: 'DELETE_PAGE',
-          payload: { pageName },
-        };
-      }
-    }
-    
-    return null;
-  };
 
   // Execute command and apply changes to blueprint
   const executeCommand = (command: Command, currentApp: AppBlueprint): { updatedApp: AppBlueprint | null; newActivePageId?: string } | null => {
@@ -230,6 +149,73 @@ export default function AppPreviewPage() {
     }
   };
 
+  // Subscribe to voice transcripts
+  useEffect(() => {
+    if (!app) return;
+
+    const unsubscribe = voiceCore.onTranscript((transcript) => {
+      if (transcript.isFinal) {
+        setCommandInput(transcript.text);
+        setIsListening(false);
+        voiceCore.stopListening();
+        
+        // Process transcript through IntentAnalyzer (same as typing)
+        const context = {
+          currentPages: app.pages.map(p => p.name),
+          appName: app.name,
+        };
+        const intentResult = IntentAnalyzer.analyzeIntent(transcript.text, context);
+        setIntentResult(intentResult);
+        
+        // Execute commands only when mode is "direct" and commands exist
+        if (intentResult.mode === 'direct' && intentResult.commands.length > 0) {
+          for (const cmd of intentResult.commands) {
+            const result = executeCommand(cmd, app);
+            if (result && result.updatedApp) {
+              setApp(result.updatedApp);
+              if (result.newActivePageId) {
+                setActivePageId(result.newActivePageId);
+              }
+              
+              // Voice output confirmation
+              let confirmationText = '';
+              if (cmd.type === 'ADD_PAGE') {
+                confirmationText = `Page ${cmd.payload.pageName} added`;
+              } else if (cmd.type === 'RENAME_PAGE') {
+                confirmationText = `Page renamed from ${cmd.payload.oldName} to ${cmd.payload.newName}`;
+              } else if (cmd.type === 'DELETE_PAGE') {
+                confirmationText = `Page ${cmd.payload.pageName} deleted`;
+              }
+              
+              if (confirmationText) {
+                voiceCore.speak(confirmationText);
+              }
+            }
+          }
+          setCommandInput('');
+          setIntentResult(null);
+        }
+      }
+    });
+
+    return () => {
+      unsubscribe();
+    };
+  }, [app, activePageId]);
+
+  const handleModeToggle = (mode: 'desktop' | 'mobile') => {
+    setPreviewMode(mode);
+    if (app) {
+      AppRegistry.updateApp(app.id, {
+        layout: {
+          ...app.layout,
+          previewMode: mode,
+        },
+      });
+      setApp(AppRegistry.getApp(app.id));
+    }
+  };
+
   const handleCommandSubmit = (command: string) => {
     if (!app) {
       console.log('[Preview] Cannot process command: app not loaded');
@@ -238,30 +224,67 @@ export default function AppPreviewPage() {
 
     console.log('[Preview] Processing command:', command);
     
-    // Parse command text into structured Command object
-    const parsedCommand = parseCommand(command);
+    // Analyze intent using IntentAnalyzer
+    const context = {
+      currentPages: app.pages.map(p => p.name),
+      appName: app.name,
+    };
     
-    if (!parsedCommand) {
-      console.log('[Preview] Command not recognized:', command);
-      console.log('[Preview] Available commands: "add page <name>", "rename page <old> to <new>", "delete page <name>"');
-      return;
-    }
-
-    // Execute command and get result
-    const result = executeCommand(parsedCommand, app);
+    const intentResult = IntentAnalyzer.analyzeIntent(command, context);
+    setIntentResult(intentResult);
     
-    if (result && result.updatedApp) {
-      setApp(result.updatedApp);
-      if (result.newActivePageId) {
-        setActivePageId(result.newActivePageId);
+    // Execute commands only when mode is "direct" and commands exist
+    if (intentResult.mode === 'direct' && intentResult.commands.length > 0) {
+      for (const cmd of intentResult.commands) {
+        const result = executeCommand(cmd, app);
+        if (result && result.updatedApp) {
+          setApp(result.updatedApp);
+          if (result.newActivePageId) {
+            setActivePageId(result.newActivePageId);
+          }
+          
+          // Voice output confirmation
+          let confirmationText = '';
+          if (cmd.type === 'ADD_PAGE') {
+            confirmationText = `Page ${cmd.payload.pageName} added`;
+          } else if (cmd.type === 'RENAME_PAGE') {
+            confirmationText = `Page renamed from ${cmd.payload.oldName} to ${cmd.payload.newName}`;
+          } else if (cmd.type === 'DELETE_PAGE') {
+            confirmationText = `Page ${cmd.payload.pageName} deleted`;
+          }
+          
+          if (confirmationText) {
+            voiceCore.speak(confirmationText);
+          }
+        }
       }
+      // Clear input and intent result after successful execution
+      setCommandInput('');
+      setIntentResult(null);
     }
+    // For vague/unknown modes, keep the intent result to show suggestions
+  };
+
+  const handleMicClick = () => {
+    if (isListening) {
+      voiceCore.stopListening();
+      setIsListening(false);
+    } else {
+      voiceCore.startListening('preview');
+      setIsListening(true);
+    }
+  };
+
+  const handleSuggestionClick = (suggestion: IntentSuggestion) => {
+    setCommandInput(suggestion.command);
+    handleCommandSubmit(suggestion.command);
   };
 
   const handleCommandKeyDown = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && commandInput.trim()) {
       handleCommandSubmit(commandInput);
-      setCommandInput('');
+      // Input clearing is handled in handleCommandSubmit for direct commands
+      // For vague/unknown, we keep the input to show suggestions
     }
   };
 
@@ -562,27 +585,107 @@ export default function AppPreviewPage() {
         <div style={{
           flex: 1,
           padding: '20px',
+          display: 'flex',
+          flexDirection: 'column',
+          gap: '16px',
         }}>
-          <input
-            type="text"
-            placeholder="Commands: 'add page About', 'rename page Home to Welcome', 'delete page About'"
-            value={commandInput}
-            onChange={(e) => setCommandInput(e.target.value)}
-            onKeyDown={handleCommandKeyDown}
-            style={{
-              width: '100%',
-              padding: '12px',
-              fontSize: '14px',
-              border: '1px solid #2d3a5a',
-              borderRadius: '8px',
-              outline: 'none',
-              backgroundColor: '#0a1128',
-              color: '#fff',
-              transition: 'border-color 0.2s',
-            }}
-            onFocus={(e) => e.currentTarget.style.borderColor = '#667eea'}
-            onBlur={(e) => e.currentTarget.style.borderColor = '#2d3a5a'}
-          />
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <input
+              type="text"
+              placeholder="Enter command..."
+              value={commandInput}
+              onChange={(e) => {
+                setCommandInput(e.target.value);
+                setIntentResult(null); // Clear previous results when typing
+              }}
+              onKeyDown={handleCommandKeyDown}
+              style={{
+                flex: 1,
+                padding: '12px',
+                fontSize: '14px',
+                border: '1px solid #2d3a5a',
+                borderRadius: '8px',
+                outline: 'none',
+                backgroundColor: '#0a1128',
+                color: '#fff',
+                transition: 'border-color 0.2s',
+              }}
+              onFocus={(e) => e.currentTarget.style.borderColor = '#667eea'}
+              onBlur={(e) => e.currentTarget.style.borderColor = '#2d3a5a'}
+            />
+            <button
+              onClick={handleMicClick}
+              style={{
+                padding: '12px',
+                fontSize: '16px',
+                backgroundColor: isListening ? '#ef4444' : 'transparent',
+                color: isListening ? '#fff' : '#667eea',
+                border: `1px solid ${isListening ? '#ef4444' : '#667eea'}`,
+                borderRadius: '8px',
+                cursor: 'pointer',
+                transition: 'all 0.2s',
+                minWidth: '44px',
+              }}
+              title={isListening ? 'Stop listening' : 'Start voice input'}
+            >
+              🎤
+            </button>
+          </div>
+          
+          {/* Intent Result Display */}
+          {intentResult && (
+            <div style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: '12px',
+            }}>
+              {intentResult.message && (
+                <p style={{
+                  fontSize: '13px',
+                  color: '#b4b8d0',
+                  margin: 0,
+                }}>
+                  {intentResult.message}
+                </p>
+              )}
+              
+              {intentResult.suggestions && intentResult.suggestions.length > 0 && (
+                <div style={{
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '8px',
+                }}>
+                  {intentResult.suggestions.map((suggestion, index) => (
+                    <button
+                      key={index}
+                      onClick={() => handleSuggestionClick(suggestion)}
+                      style={{
+                        padding: '8px 12px',
+                        fontSize: '13px',
+                        textAlign: 'left',
+                        backgroundColor: '#0a1128',
+                        color: '#667eea',
+                        border: '1px solid #667eea',
+                        borderRadius: '6px',
+                        cursor: 'pointer',
+                        transition: 'all 0.2s',
+                      }}
+                      onMouseEnter={(e) => {
+                        e.currentTarget.style.backgroundColor = '#667eea';
+                        e.currentTarget.style.color = '#fff';
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.backgroundColor = '#0a1128';
+                        e.currentTarget.style.color = '#667eea';
+                      }}
+                    >
+                      {suggestion.label}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
     </div>
